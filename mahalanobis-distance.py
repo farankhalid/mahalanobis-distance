@@ -11,8 +11,22 @@ logging.basicConfig(
 
 # Load and preprocess the data
 logging.debug("Loading CSV files.")
-patent_shares = pd.read_csv("data/MainfilrARS2_share.csv")
-firm_data = pd.read_csv("data/MainfilrARS2.csv")
+patent_shares = pd.read_csv("oldest-data/sample_w_patshare2.csv")
+firm_data = pd.read_csv("oldest-data/test1.csv")
+
+# Print current data types
+logging.debug(f"Current data types in patent_shares:\n{patent_shares.dtypes}")
+logging.debug(f"Current data types in firm_data:\n{firm_data.dtypes}")
+
+# Reduce data types for numerical columns
+def optimize_dtypes(df):
+    for col in df.select_dtypes(include=['float64']).columns:
+        df[col] = pd.to_numeric(df[col], downcast='float')
+    for col in df.select_dtypes(include=['int64']).columns:
+        df[col] = pd.to_numeric(df[col], downcast='integer')
+
+# optimize_dtypes(patent_shares)
+# optimize_dtypes(firm_data)
 
 logging.debug(f"Loaded patent_shares with shape {patent_shares.shape}.")
 logging.debug(f"Loaded firm_data with shape {firm_data.shape}.")
