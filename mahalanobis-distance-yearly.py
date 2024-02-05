@@ -10,6 +10,11 @@ logging.basicConfig(
 )
 
 
+def regularize_cov_matrix(cov_matrix, alpha=1e-5):
+    regularized_cov = cov_matrix + alpha * np.eye(cov_matrix.shape[0])
+    return regularized_cov
+
+
 def optimize_dtypes(df):
     """Optimize data types of a DataFrame to reduce memory usage."""
     for col in df.columns:
@@ -55,7 +60,9 @@ for year in years:
 
     # Calculate shares for firm-year level
     year_firm_shares = (
-        year_firms.groupby(["permno_year", "IPC1"]).size().reset_index(name="count")
+        year_firms.groupby(["permno_year", "IPC1"], observed=True)
+        .size()
+        .reset_index(name="count")
     )
     total_patents = year_firm_shares.groupby("permno_year")["count"].transform("sum")
     year_firm_shares["share"] = year_firm_shares["count"] / total_patents
@@ -77,7 +84,11 @@ for year in years:
 
     # Calculate pseudo-inverse of covariance matrix for Mahalanobis distance
     cov_matrix = np.cov(year_firm_vectors.values.T)
-    inv_cov_matrix = pinv(cov_matrix)
+
+    try:
+        inv_cov_matrix = np.linalg.inv(regularize_cov_matrix(cov_matrix))
+    except ValueError as e:
+        logging.error(f"Error calculating inverse covariance matrix: {e}")
 
     for publn_nr, patent_vector in year_patent_vectors.iterrows():
         permno_year = year_patents[year_patents["publn_nr"] == publn_nr][
