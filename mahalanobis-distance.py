@@ -11,31 +11,47 @@ logging.basicConfig(
 
 # Load and preprocess the data
 logging.debug("Loading CSV files.")
-patent_shares = pd.read_csv("oldest-data/sample_w_patshare2.csv")
-firm_data = pd.read_csv("oldest-data/test1.csv")
+patent_shares = pd.read_csv("data/MainfilrARS2_share.csv")
+firm_data = pd.read_csv("data/MainfilrARS2.csv")
 
 # Print current data types
 logging.debug(f"Current data types in patent_shares:\n{patent_shares.dtypes}")
 logging.debug(f"Current data types in firm_data:\n{firm_data.dtypes}")
 
-# Reduce data types for numerical columns
-def optimize_dtypes(df):
-    for col in df.select_dtypes(include=['float64']).columns:
-        df[col] = pd.to_numeric(df[col], downcast='float')
-    for col in df.select_dtypes(include=['int64']).columns:
-        df[col] = pd.to_numeric(df[col], downcast='integer')
 
-# optimize_dtypes(patent_shares)
-# optimize_dtypes(firm_data)
+def optimize_dtypes(df):
+    for col in df.columns:
+        col_data = df[col]
+
+        # Downcast floating point numbers
+        if col_data.dtype == "float64":
+            df[col] = pd.to_numeric(col_data, downcast="float")
+
+        # Downcast integers
+        elif col_data.dtype == "int64":
+            df[col] = pd.to_numeric(col_data, downcast="integer")
+
+        # Convert object columns to 'string' dtype
+        elif col_data.dtype == "object":
+            # Convert object dtype to 'string', which can utilize pyarrow for optimization if available
+            df[col] = col_data.astype("string")
+
+
+optimize_dtypes(patent_shares)
+optimize_dtypes(firm_data)
+
+logging.debug("After optimization:")
+logging.debug(f"Optimized data types in patent_shares:\n{patent_shares.dtypes}")
+logging.debug(f"Optimized data types in firm_data:\n{firm_data.dtypes}")
 
 logging.debug(f"Loaded patent_shares with shape {patent_shares.shape}.")
 logging.debug(f"Loaded firm_data with shape {firm_data.shape}.")
 
 # Preprocess and calculate shares for firm-year level
 logging.debug("Preprocessing firm_data and calculating shares.")
-firm_data["permno_year"] = firm_data["permno_adj"].astype(str) + firm_data[
+firm_data["permno_year"] = firm_data["permno_adj"].astype("string") + firm_data[
     "publn_year"
-].astype(str)
+].astype("string")
 firm_shares = (
     firm_data.groupby(["permno_year", "IPC1"])
     .size()
@@ -43,15 +59,15 @@ firm_shares = (
     .transform(lambda x: x / x.sum())
     .reset_index()
 )
-logging.info(f"firm shares: {firm_shares}")
+# logging.info(f"firm shares: {firm_shares}")
 firm_shares.columns = ["permno_year", "IPC1", "share"]
 
 logging.debug(f"Processed firm_shares with shape {firm_shares.shape}.")
 
 # Ensure the data types match between dataframes
-patent_shares["permno_year"] = patent_shares["permno_adj"].astype(str) + patent_shares[
-    "publn_year"
-].astype(str)
+patent_shares["permno_year"] = patent_shares["permno_adj"].astype(
+    "string"
+) + patent_shares["publn_year"].astype("string")
 
 # Prepare the patent-level DataFrame
 logging.debug("Pivoting patent_shares to create patent_vectors.")

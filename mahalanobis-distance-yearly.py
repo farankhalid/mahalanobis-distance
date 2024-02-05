@@ -1,85 +1,103 @@
 import pandas as pd
 import numpy as np
-from scipy.spatial import distance
+from scipy.spatial.distance import mahalanobis
+from scipy.linalg import pinv
+import logging
 
-
-def regularize_cov_matrix(cov_matrix, alpha=1e-5):
-    if cov_matrix.size == 0 or np.isscalar(cov_matrix) or cov_matrix.ndim < 2:
-        # Return None if cov_matrix is not valid
-        return None
-    return cov_matrix + alpha * np.eye(cov_matrix.shape[0])
-
-
-# Load data
-patents = pd.read_csv("oldest-data/test1.csv")
-patent_shares = pd.read_csv("oldest-data/sample_w_patshare2.csv")
-
-# Preprocess data
-patents["permno_year"] = patents["permno_adj"].astype(str) + patents[
-    "publn_year"
-].astype(str)
-patent_shares["permno_year"] = patent_shares["permno_adj"].astype(str) + patent_shares[
-    "publn_year"
-].astype(str)
-
-# Aggregate and prepare vectors
-patents_grouped = (
-    patents.groupby(["permno_year", "IPC1"])["publn_nr"]
-    .nunique()
-    .reset_index(name="ipc_patents")
-)
-patents_grouped["total_patents"] = patents_grouped.groupby("permno_year")[
-    "ipc_patents"
-].transform("sum")
-patents_grouped["share"] = (
-    patents_grouped["ipc_patents"] / patents_grouped["total_patents"]
+# Setup logging
+logging.basicConfig(
+    level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-firm_vector = patents_grouped.pivot(
-    index="permno_year", columns="IPC1", values="share"
-).fillna(0)
-patent_vector = patent_shares.pivot(
-    index="publn_nr", columns="IPC1", values="share_pat"
-).fillna(0)
 
-# Ensure columns match
-common_columns = firm_vector.columns.intersection(patent_vector.columns)
-firm_vector_filtered = firm_vector[common_columns].fillna(0).to_numpy()
-patent_vector_filtered = patent_vector.reindex(
-    columns=common_columns, fill_value=0
-).to_numpy()
+def optimize_dtypes(df):
+    """Optimize data types of a DataFrame to reduce memory usage."""
+    for col in df.columns:
+        if df[col].dtype == float:
+            df[col] = pd.to_numeric(df[col], downcast="float")
+        elif df[col].dtype == int:
+            df[col] = pd.to_numeric(df[col], downcast="integer")
+        elif df[col].dtype == object:
+            df[col] = df[col].astype("category")
 
-results = []
 
-# Iterate over each patent
-for index, row in patent_vector.iterrows():
-    firm_year = patent_shares.loc[
-        patent_shares["publn_nr"] == index, "permno_year"
-    ].iloc[0]
-    if firm_year in firm_vector.index:
-        firm_row = firm_vector.loc[firm_year, common_columns].fillna(0).to_numpy()
-        cov_matrix = np.cov(firm_vector_filtered, rowvar=False)
-        inv_cov_matrix = regularize_cov_matrix(cov_matrix)
+# Load CSV files
+logging.debug("Loading CSV files.")
+patent_shares = pd.read_csv("data/MainfilrARS2_share.csv")
+firm_data = pd.read_csv("data/MainfilrARS2.csv")
 
-        # Skip if inv_cov_matrix is None or ill-conditioned
-        if (
-            inv_cov_matrix is None
-            or np.linalg.cond(inv_cov_matrix) > 1 / np.finfo(inv_cov_matrix.dtype).eps
-        ):
-            print(
-                f"Skipping {index} due to singular or ill-conditioned covariance matrix."
+# Optimize data types
+optimize_dtypes(patent_shares)
+optimize_dtypes(firm_data)
+
+# Log shapes of loaded dataframes
+logging.debug(f"Loaded patent_shares with shape {patent_shares.shape}.")
+logging.debug(f"Loaded firm_data with shape {firm_data.shape}.")
+
+# Prepare permno_year column
+patent_shares["permno_year"] = (
+    patent_shares["permno_adj"].astype(str)
+    + "_"
+    + patent_shares["publn_year"].astype(str)
+)
+firm_data["permno_year"] = (
+    firm_data["permno_adj"].astype(str) + "_" + firm_data["publn_year"].astype(str)
+)
+
+# Process data by year
+years = patent_shares["publn_year"].unique()
+output_data = []
+
+for year in years:
+    logging.debug(f"Processing year: {year}")
+    year_patents = patent_shares[patent_shares["publn_year"] == year]
+    year_firms = firm_data[firm_data["publn_year"] == year]
+
+    # Calculate shares for firm-year level
+    year_firm_shares = (
+        year_firms.groupby(["permno_year", "IPC1"]).size().reset_index(name="count")
+    )
+    total_patents = year_firm_shares.groupby("permno_year")["count"].transform("sum")
+    year_firm_shares["share"] = year_firm_shares["count"] / total_patents
+
+    # Pivot tables
+    year_patent_vectors = year_patents.pivot(
+        index="publn_nr", columns="IPC1", values="share_pat"
+    ).fillna(0)
+    year_firm_vectors = year_firm_shares.pivot(
+        index="permno_year", columns="IPC1", values="share"
+    ).fillna(0)
+
+    # Align IPC classes
+    all_ipc_classes = year_patent_vectors.columns.union(year_firm_vectors.columns)
+    year_patent_vectors = year_patent_vectors.reindex(
+        columns=all_ipc_classes, fill_value=0
+    )
+    year_firm_vectors = year_firm_vectors.reindex(columns=all_ipc_classes, fill_value=0)
+
+    # Calculate pseudo-inverse of covariance matrix for Mahalanobis distance
+    cov_matrix = np.cov(year_firm_vectors.values.T)
+    inv_cov_matrix = pinv(cov_matrix)
+
+    for publn_nr, patent_vector in year_patent_vectors.iterrows():
+        permno_year = year_patents[year_patents["publn_nr"] == publn_nr][
+            "permno_year"
+        ].iloc[0]
+        if permno_year in year_firm_vectors.index:
+            firm_vector = year_firm_vectors.loc[permno_year].values
+            distance = mahalanobis(patent_vector, firm_vector, inv_cov_matrix)
+            output_data.append(
+                {
+                    "year": year,
+                    "permno_year": permno_year,
+                    "publn_nr": publn_nr,
+                    "mahalanobis_distance": distance,
+                }
             )
-            continue
 
-        try:
-            mahal_dist = distance.mahalanobis(row.to_numpy(), firm_row, inv_cov_matrix)
-            results.append([firm_year, index, mahal_dist])
-        except ValueError as e:
-            print(f"Error calculating Mahalanobis distance for {index}: {e}")
-
-# Convert results to DataFrame and save
-results_df = pd.DataFrame(results, columns=["permno_year", "publn_nr", "mahal_dist"])
-results_df.to_csv("output/mahalanobis-results-updated.csv", index=False)
-print(
-    "Mahalanobis distance calculation is completed and saved to output/mahalanobis-results-updated.csv."
+# Convert the output data to a DataFrame and save
+output_df = pd.DataFrame(output_data)
+output_df.to_csv("mahalanobis_distances_yearly.csv", index=False)
+logging.debug(
+    "Calculation completed and output saved. Check mahalanobis_distances_yearly.csv for results."
 )
