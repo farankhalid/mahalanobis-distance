@@ -4,7 +4,6 @@ from scipy.spatial.distance import mahalanobis
 from scipy.linalg import pinv
 from numpy.linalg import matrix_rank
 import logging
-import os
 
 # Setup logging
 logging.basicConfig(
@@ -51,20 +50,17 @@ def aggregate_ipc_shares(df, df_type):
     return pivot_df
 
 
+# Function to compute Mahalanobis distance
 def compute_mahalanobis(df_firm, df_patent, cov_inv):
     logging.info("Computing Mahalanobis distances...")
     distances = []
     for index, row in df_patent.iterrows():
-        permno_year = row.get("permno_year", index)
-        firm_vector = (
-            df_firm.loc[permno_year].values if permno_year in df_firm.index else None
-        )
-        patent_vector = (
-            row.drop(["publn_nr", "permno_year"], errors="ignore").values
-            if firm_vector is not None
-            else None
-        )
-        if patent_vector is not None:
+        permno_year = row["permno_year"] if "permno_year" in row else index
+        if permno_year in df_firm.index:
+            firm_vector = df_firm.loc[permno_year].values
+            patent_vector = row.drop(
+                ["publn_nr", "permno_year"], errors="ignore"
+            ).values
             try:
                 distance = mahalanobis(patent_vector, firm_vector, cov_inv)
                 distances.append(
@@ -87,44 +83,33 @@ def compute_mahalanobis(df_firm, df_patent, cov_inv):
     return pd.DataFrame(distances)
 
 
-# Ensure results directory exists
-results_dir = "yearly_results"
-if not os.path.exists(results_dir):
-    os.makedirs(results_dir)
-
+# Process each year separately
 logging.info("Starting yearly processing...")
 years = sorted(df_main["publn_year"].unique())
+all_results = pd.DataFrame()
 
 for year in years:
-    file_exists = any(
-        str(year) in file
-        for file in os.listdir(results_dir)
-        if os.path.isfile(os.path.join(results_dir, file))
+    logging.info(f"Processing year: {year}")
+    df_main_year = df_main[df_main["publn_year"] == year]
+    df_share_year = df_share[df_share["publn_year"] == year]
+
+    # Aggregate shares for both datasets
+    df_main_agg = aggregate_ipc_shares(df_main_year, "main")
+    df_share_agg = aggregate_ipc_shares(df_share_year, "share").reset_index()
+
+    # Compute covariance matrix and its inverse for df_main_agg
+    logging.info("Computing covariance matrix and its inverse...")
+    cov_matrix = np.cov(df_main_agg.values.T)
+    cov_inv = (
+        pinv(cov_matrix)
+        if matrix_rank(cov_matrix) == cov_matrix.shape[0]
+        else pinv(cov_matrix + np.eye(cov_matrix.shape[0]) * 0.01)
     )
-    if file_exists:
-        logging.info(f"Skipping year: {year}")
-        continue
-    else:
-        logging.info(f"Processing year: {year}")
-        df_main_year = df_main[df_main["publn_year"] == year]
-        df_share_year = df_share[df_share["publn_year"] == year]
 
-        df_main_agg = aggregate_ipc_shares(df_main_year, "main")
-        df_share_agg = aggregate_ipc_shares(df_share_year, "share").reset_index()
+    # Compute Mahalanobis distances
+    yearly_results = compute_mahalanobis(df_main_agg, df_share_agg, cov_inv)
+    all_results = pd.concat([all_results, yearly_results], ignore_index=True)
 
-        logging.info("Computing covariance matrix and its inverse...")
-        cov_matrix = np.cov(df_main_agg.values.T)
-        cov_inv = (
-            pinv(cov_matrix)
-            if matrix_rank(cov_matrix) == cov_matrix.shape[0]
-            else pinv(cov_matrix + np.eye(cov_matrix.shape[0]) * 0.01)
-        )
-
-        yearly_results = compute_mahalanobis(df_main_agg, df_share_agg, cov_inv)
-        yearly_file_path = os.path.join(
-            results_dir, f"mahalanobis_distances_{year}.csv"
-        )
-        yearly_results.to_csv(yearly_file_path, index=False)
-        logging.info(f"Results for {year} saved to {yearly_file_path}.")
-
-logging.info("Yearly processing completed. Individual yearly results saved.")
+logging.info("Yearly processing completed. Saving results...")
+all_results.to_csv("output/mahalanobis-distances-yearly-new.csv", index=False)
+logging.info("Results saved.")
